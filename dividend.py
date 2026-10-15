@@ -7,6 +7,7 @@
   uv run python dividend.py screen --no-notify   # 不推播
   uv run python dividend.py notify               # 用今天已產生的報告重送推播（不重跑）
   uv run python dividend.py notify --as-of 2026-10-15
+  uv run python dividend.py sheet --as-of 2026-10-15   # 只把報告寫進 Google Sheet「Dividend」分頁
 
 篩選完成後會依 .env 的 NOTIFY_CHANNEL（teams / telegram / both）推一則摘要，
 含兩策略選入名單、殖利率、與前次名單的新增 / 移出。
@@ -104,7 +105,31 @@ def send_summary(as_of: str, pool_size: int | None = None, skipped: list[str] | 
     return False
 
 
-def cmd_screen(as_of: str, size: int, rebuild: bool = False, notify: bool = True):
+def record_to_sheet(as_of: str) -> bool:
+    """把 as_of 的兩策略選股寫進 Google Sheet「Dividend」分頁（含與前次比較、是否已在 Watchlist）。
+    Google 設定不完整或寫入失敗只警告、不中斷。不會修改 Watchlist。"""
+    import os
+    missing = [k for k in ("GOOGLE_SHEET_ID", "GOOGLE_CREDS_JSON") if not os.environ.get(k)]
+    if missing:
+        print(f"⚠️ 未寫入 Google Sheet：.env 缺少 {missing}", file=sys.stderr)
+        return False
+    try:
+        from stock_strategies.dividend.notify_msg import build_sections, sheet_rows
+        from stock_strategies.dividend.screen import load_strategies
+        from stock_strategies.sheet import read_watchlist_status, write_dividend_picks
+        sections = build_sections(REPORT_DIR, as_of, load_strategies())
+        rows = sheet_rows(as_of, sections, read_watchlist_status())
+        n = write_dividend_picks(as_of, rows)
+    except Exception as e:
+        print(f"⚠️ 寫入 Google Sheet 失敗：{type(e).__name__}: {str(e)[:150]}", file=sys.stderr)
+        return False
+    todo = sum(1 for r in rows if r[-1] == "未加入" and not str(r[-2]).startswith("移出"))
+    print(f"✅ 已寫入 Google Sheet「Dividend」分頁 {n} 列（未加入 Watchlist 的選入股 {todo} 檔）")
+    return True
+
+
+def cmd_screen(as_of: str, size: int, rebuild: bool = False, notify: bool = True,
+               sheet: bool = True):
     import pandas as pd
     from stock_strategies.dividend import fundamentals as F
     from stock_strategies.dividend.screen import (
@@ -175,6 +200,8 @@ def cmd_screen(as_of: str, size: int, rebuild: bool = False, notify: bool = True
     if skipped:
         print(f"⚠️ {len(skipped)} 檔讀取失敗未評估：{', '.join(s for s, _, _ in skipped)}"
               "；再跑一次 screen 即可補上")
+    if sheet:
+        record_to_sheet(as_of)
     if notify:
         send_summary(as_of, len(pool), [f"{s} {n}".strip() for s, n, _ in skipped])
 
@@ -189,8 +216,11 @@ def main(argv=None):
         p.add_argument("--rebuild", action="store_true", help="忽略既有池檔重建")
         if name == "screen":
             p.add_argument("--no-notify", action="store_true", help="篩選完不推播")
+            p.add_argument("--no-sheet", action="store_true", help="篩選完不寫 Google Sheet")
     pn = sub.add_parser("notify", help="用已產生的篩選報告重送推播（不重跑篩選）")
     pn.add_argument("--as-of", default=str(date.today()), help="報告日期 YYYY-MM-DD，預設今天")
+    ps = sub.add_parser("sheet", help="把已產生的篩選報告寫進 Google Sheet「Dividend」分頁")
+    ps.add_argument("--as-of", default=str(date.today()), help="報告日期 YYYY-MM-DD，預設今天")
     args = ap.parse_args(argv)
     try:                                   # Windows 主控台 / 重導向時避免 emoji 編碼錯誤
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -199,13 +229,16 @@ def main(argv=None):
     _load_env()
     if args.cmd == "notify":
         sys.exit(0 if send_summary(args.as_of) else 2)
+    if args.cmd == "sheet":
+        sys.exit(0 if record_to_sheet(args.as_of) else 2)
     from stock_strategies.dividend.fetch import enable_batch_pacing
     enable_batch_pacing()   # 每次打 API 間隔 ≥6.1 秒，不撞 FinMind 600 次/小時上限
     print("ℹ️ 已啟用控速（≤590 次/小時）；中斷後重跑會從快取接續。執行期間請勿同時跑每日系統。")
     if args.cmd == "pool":
         get_pool(args.as_of, args.size, rebuild=args.rebuild)
     else:
-        cmd_screen(args.as_of, args.size, rebuild=args.rebuild, notify=not args.no_notify)
+        cmd_screen(args.as_of, args.size, rebuild=args.rebuild, notify=not args.no_notify,
+                   sheet=not args.no_sheet)
 
 
 if __name__ == "__main__":

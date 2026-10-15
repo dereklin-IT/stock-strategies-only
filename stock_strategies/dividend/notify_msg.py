@@ -103,5 +103,44 @@ def build_sections(report_dir: Path, as_of: str, strategies: list[dict]) -> list
             prev_pick = selection_from_csv(prev[1], mh)
             sec["prev"] = (prev[0], set(prev_pick["stock_id"]))
             sec["prev_names"] = dict(zip(prev_pick["stock_id"], prev_pick["name"]))
+            sec["prev_pick"] = prev_pick
+        sec["short"] = st.get("short_name") or st["name"].split("（")[0].replace("定存股・", "")
         out.append(sec)
     return out
+
+
+def sheet_rows(as_of: str, sections: list[dict], watchlist: dict[str, bool] | None = None) -> list[list]:
+    """給 Google Sheet「Dividend」分頁的列。
+    每個策略：本次選入（排名、與前次比較：新增／持續／首次）＋ 前次有、本次沒有的（移出）。
+    watchlist：{stock_id: enabled}，用來標示是否已在 Watchlist。"""
+    wl = watchlist or {}
+
+    def wl_mark(sid):
+        if sid not in wl:
+            return "未加入"
+        return "已加入（啟用）" if wl[sid] else "已加入（停用）"
+
+    def num(v, nd):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return ""
+        return "" if pd.isna(f) else round(f, nd)
+
+    rows = []
+    for s in sections:
+        prev_ids = s["prev"][1] if s.get("prev") else None
+        for i, r in enumerate(s["pick"].itertuples(index=False), 1):
+            sid = str(r.stock_id)
+            change = "首次" if prev_ids is None else ("持續" if sid in prev_ids else "新增")
+            rows.append([as_of, s["short"], i, sid, r.name, num(r.per, 2),
+                         num(r.dividend_yield, 2), num(getattr(r, "pbr", None), 2),
+                         change, wl_mark(sid)])
+        if prev_ids is not None and s.get("prev_pick") is not None:
+            now = set(s["pick"]["stock_id"].astype(str))
+            for r in s["prev_pick"].itertuples(index=False):
+                sid = str(r.stock_id)
+                if sid not in now:
+                    rows.append([as_of, s["short"], "", sid, r.name, "", "", "",
+                                 f"移出（{s['prev'][0]} 有）", wl_mark(sid)])
+    return rows

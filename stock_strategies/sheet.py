@@ -193,3 +193,45 @@ def write_performance(records: list[dict]):
 
     rows = [[r.get(h, "") for h in PERFORMANCE_HEADERS] for r in records]
     ws.append_rows(rows)
+
+
+# ── 定存股（策略 2 / 3）紀錄 ───────────────────────────────
+DIVIDEND_SHEET = "Dividend"
+DIVIDEND_HEADERS = ["日期", "策略", "排名", "stock_id", "名稱", "本益比", "殖利率%",
+                    "股價淨值比", "與前次比較", "Watchlist"]
+
+
+def read_watchlist_status() -> dict[str, bool]:
+    """Watchlist 所有股票（不論 enabled）→ {stock_id: 是否啟用}。分頁不存在回空 dict。"""
+    sh = get_gsheet()
+    try:
+        ws = sh.worksheet("Watchlist")
+    except gspread.WorksheetNotFound:
+        return {}
+    out = {}
+    for r in ws.get_all_records():
+        sid = str(r.get("stock_id", "")).strip()
+        if sid:
+            out[sid] = str(r.get("enabled", "")).upper() in ("TRUE", "1", "YES")
+    return out
+
+
+def write_dividend_picks(as_of: str, rows: list[list]) -> int:
+    """寫入 Dividend 分頁：先移除同一日期的舊列（同日重跑不重複），再接在最後。
+    分頁不存在會自動建立。回傳寫入列數。"""
+    sh = get_gsheet()
+    try:
+        ws = sh.worksheet(DIVIDEND_SHEET)
+        values = ws.get_all_values()
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=DIVIDEND_SHEET, rows=1000, cols=len(DIVIDEND_HEADERS))
+        values = []
+    kept = [v for v in values[1:] if v and v[0] != as_of] if values else []
+    table = [DIVIDEND_HEADERS] + kept + [[str(c) if c is not None else "" for c in r] for r in rows]
+    ws.clear()
+    ws.update(values=table, range_name="A1", value_input_option="USER_ENTERED")
+    try:
+        ws.freeze(rows=1)
+    except Exception:
+        pass
+    return len(rows)
