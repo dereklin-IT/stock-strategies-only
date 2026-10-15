@@ -25,7 +25,8 @@ def get_market_state(ma_period: int = 20) -> dict:
             note = f"🟢 加權 {close:.0f} 站上 {ma_period} 日線 ({pct:+.1f}%)，BUY 訊號照常發出"
         else:
             note = f"🔴 加權 {close:.0f} 跌破 {ma_period} 日線 ({pct:+.1f}%)，BUY 全數降為 WATCH"
-        return {"bullish": bullish, "close": close, "ma20": ma20, "note": note}
+        return {"bullish": bullish, "close": close, "ma20": ma20,
+                "ma_period": ma_period, "note": note}
     except Exception as e:
         return {"bullish": True, "close": None, "ma20": None,
                 "note": f"⚠️ 大盤狀態取得失敗（{str(e)[:60]}），暫不套用濾鏡"}
@@ -39,6 +40,7 @@ def apply_market_filter(results: list[dict], market: dict) -> int:
     for r in results:
         if r.get("action") == "BUY":
             r["action"] = "WATCH"
-            r.setdefault("risk_notes", []).append("大盤跌破月線，自動降為 WATCH")
+            period = market.get("ma_period", 20)
+            r.setdefault("risk_notes", []).append(f"大盤跌破 {period} 日線，自動降為 WATCH")
             downgraded += 1
     return downgraded

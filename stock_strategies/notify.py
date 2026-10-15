@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -8,16 +9,115 @@ import requests
 from .config import CONFIG, TELEGRAM_API
 
 
-def send_telegram(text: str):
+def send_telegram(text: str) -> bool:
+    """發送一則 Telegram。成功回 True；失敗印出簡短原因並回 False（不丟例外，讓其他訊息照送）。
+
+    公司網路等環境會被防火牆攔截，回的是 HTML 封鎖頁而非 Telegram 的 JSON，
+    這種情況只印一行重點，避免把整頁 HTML 灌進 log。"""
     url = TELEGRAM_API.format(token=os.environ["TELEGRAM_BOT_TOKEN"])
     payload = {
         "chat_id": os.environ["TELEGRAM_CHAT_ID"],
         "text": text,
         "parse_mode": "Markdown",
     }
-    r = requests.post(url, json=payload, timeout=10)
-    if not r.ok:
-        print(f"Telegram 送失敗: {r.text}", file=sys.stderr)
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+    except requests.RequestException as e:
+        print(f"❌ Telegram 送失敗（連線錯誤）: {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+        return False
+    try:
+        body = r.json()
+    except ValueError:
+        body = None
+    if r.ok and isinstance(body, dict) and body.get("ok", True):
+        return True
+    if body is None:
+        blocked = "blocked" in r.text.lower()
+        reason = "網路被防火牆/公司政策攔截" if blocked else "回應不是 Telegram API 格式"
+        print(f"❌ Telegram 送失敗（HTTP {r.status_code}，{reason}）", file=sys.stderr)
+    else:
+        print(f"❌ Telegram 送失敗（HTTP {r.status_code}）: {str(body.get('description', body))[:200]}",
+              file=sys.stderr)
+    return False
+
+
+# ── 推播通道 ───────────────────────────────────────────────
+# NOTIFY_CHANNEL：telegram（預設，維持舊行為）／ teams ／ both
+CHANNEL_ENV = {
+    "telegram": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    "teams": ["TEAMS_WEBHOOK_URL"],
+}
+
+
+def notify_channels() -> list[str]:
+    raw = (os.environ.get("NOTIFY_CHANNEL") or "telegram").strip().lower()
+    chans = ["telegram", "teams"] if raw == "both" else [c.strip() for c in raw.split(",") if c.strip()]
+    bad = [c for c in chans if c not in CHANNEL_ENV]
+    if bad or not chans:
+        raise ValueError(f"NOTIFY_CHANNEL 不認得：{raw}（可用 telegram / teams / both）")
+    return chans
+
+
+def required_notify_env() -> list[str]:
+    """目前推播通道需要的環境變數（給 main / premarket 檢查用）。"""
+    return [k for c in notify_channels() for k in CHANNEL_ENV[c]]
+
+
+def _md_to_teams(line: str) -> str:
+    """Telegram Markdown → Teams Adaptive Card markdown：*粗體* → **粗體**；_斜體_ 兩邊相同。"""
+    return re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"**\1**", line)
+
+
+def teams_card(text: str) -> dict:
+    """把一則文字訊息轉成 Teams Workflows webhook 要的 Adaptive Card。
+    每一行一個 TextBlock（Teams 的 TextBlock 不吃單一換行），空行變成間距。"""
+    body, gap = [], False
+    for line in text.split("\n"):
+        if not line.strip():
+            gap = True
+            continue
+        block = {"type": "TextBlock", "text": _md_to_teams(line), "wrap": True}
+        if gap:
+            block["spacing"] = "Medium"
+            gap = False
+        else:
+            block["spacing"] = "None"
+        body.append(block)
+    if body:
+        body[0].update({"weight": "Bolder", "size": "Medium"})
+    return {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard", "version": "1.4",
+                "msteams": {"width": "Full"},
+                "body": body,
+            },
+        }],
+    }
+
+
+def send_teams(text: str) -> bool:
+    """經 Teams Workflows webhook 推播。成功（2xx，通常 202）回 True。"""
+    url = os.environ["TEAMS_WEBHOOK_URL"]
+    try:
+        r = requests.post(url, json=teams_card(text), timeout=20)
+    except requests.RequestException as e:
+        print(f"❌ Teams 送失敗（連線錯誤）: {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+        return False
+    if 200 <= r.status_code < 300:
+        return True
+    detail = r.text[:200] if "<html" not in r.text[:200].lower() else "（HTML 頁面，可能被網路攔截）"
+    print(f"❌ Teams 送失敗（HTTP {r.status_code}）: {detail}", file=sys.stderr)
+    return False
+
+
+def send_notification(text: str) -> bool:
+    """依 NOTIFY_CHANNEL 送到一個或多個通道；全部成功才回 True。"""
+    senders = {"telegram": send_telegram, "teams": send_teams}
+    return all([senders[c](text) for c in notify_channels()])
 
 
 def _trend_emoji(chg: float) -> str:
@@ -37,6 +137,8 @@ def _format_stock_detail(s: dict, show_trend: bool = True) -> list[str]:
     lines = []
     wr = f"{c['backtest_winrate']*100:.0f}%" if c.get("backtest_winrate") is not None else "N/A"
     fund = "✅" if c.get("fundamental_pass") else "❌"
+    if c.get("fundamental_score") is not None:
+        fund += f"{c['fundamental_score']:.0f}"
 
     lines.append(f"*{s['stock_id']} {s['name']}*  綜合 {s['signal_score']} 分")
     if show_trend and t:
@@ -56,8 +158,8 @@ def _format_stock_detail(s: dict, show_trend: bool = True) -> list[str]:
         f"📌 *明日開盤進場* | 參考價 {s['entry_price']}"
     )
     lines.append(
-        f"停損 {s['stop_loss_price']} (-{CONFIG['stop_loss']*100:.0f}%) / "
-        f"目標 {s['target_price']} (+{CONFIG['target_return']*100:.0f}%)"
+        f"停損 {s['stop_loss_price']} (-{s.get('stop_loss_pct', CONFIG['stop_loss'])*100:.0f}%) / "
+        f"目標 {s['target_price']} (+{s.get('target_pct', CONFIG['target_return'])*100:.0f}%)"
     )
     lines.append(
         f"風報比 1:{s['risk_reward_ratio']} | 建議部位 {s['position_size_pct']}%"
@@ -142,13 +244,37 @@ def _market_sentiment(signals: list[dict]) -> str:
         return "🔴 偏空 — 普遍下跌，建議空手等待"
 
 
+def _format_rules(p: dict) -> str:
+    """依策略參數產生『策略規則』說明（取代原本寫死的 EPS>5 / 30-30-40 / 65 / 8%/10%）。"""
+    techs = [name for key, name in (
+        ("use_ma_alignment", "均線"), ("use_bollinger_bounce", "布林"),
+        ("use_kd_golden_cross", "KD"), ("use_macd_bullish", "MACD"),
+    ) if p.get(key)]
+    wf, wt, wb = p["weight_fundamental"], p["weight_technical"], p["weight_backtest"]
+    ws = (wf + wt + wb) or 1
+    return (
+        f"基本面(EPS>{p['eps_threshold']:g},ROE>{p['roe_threshold']:g}) + "
+        f"技術面({'/'.join(techs) or '無'}) + {p['backtest_years']}年回測\n"
+        f"綜合 = 基本面{wf/ws*100:.0f}% + 技術{wt/ws*100:.0f}% + 回測{wb/ws*100:.0f}%\n"
+        f"BUY≥{p['min_total_score_for_buy']:g}(且技術≥{p['min_tech_score_for_buy']:g}"
+        f"{'、基本面過門檻' if p['fundamental_pass_required'] else ''}) | WATCH≥50\n"
+        f"停損{p['stop_loss']*100:.0f}% / 停利{p['target_return']*100:.0f}% / "
+        f"持有{p['hold_days']}日 | 回測已扣成本{p['round_trip_cost']*100:.3g}%"
+    )
+
+
 def format_messages(
     signals: list[dict],
     watchlist: list[dict] = None,
     market: dict = None,
     night_note: str = None,
+    params: dict = None,
 ) -> list[str]:
-    """產生多則 Telegram 訊息"""
+    """產生多則 Telegram 訊息。params = 本次使用的策略參數（merge_params 結果），
+    不給則用內建預設值。"""
+    if params is None:
+        from .loader import merge_params
+        params = merge_params(None)
     buys = [s for s in signals if s.get("action") == "BUY"]
     watches = [s for s in signals if s.get("action") == "WATCH"]
     skips = [s for s in signals if s.get("action") in ("SKIP", "ERROR")]
@@ -191,12 +317,7 @@ def format_messages(
         msg1.append("")
 
     msg1.append("📋 *策略規則*")
-    msg1.append(
-        "基本面(EPS>5,ROE>15) + 技術面(均線/布林/KD/MACD) + 3年回測\n"
-        f"綜合 = 基本面30% + 技術30% + 回測40%\n"
-        f"BUY≥65(三關全過) | WATCH≥50\n"
-        f"停損{CONFIG['stop_loss']*100:.0f}% / 停利{CONFIG['target_return']*100:.0f}% / 持有{CONFIG['hold_days']}日"
-    )
+    msg1.append(_format_rules(params))
     messages.append("\n".join(msg1))
 
     # === 第二則：BUY 詳細 ===

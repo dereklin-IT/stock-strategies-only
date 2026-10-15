@@ -11,6 +11,30 @@ from .volume import detect_patterns, verdict as volume_verdict
 from .loader import merge_params
 
 
+def _ratio_score(value: float, threshold: float) -> float:
+    """單一指標分數：達門檻 80 分、達 2 倍門檻 100 分；未達門檻按比例 0~60 分。"""
+    if threshold > 0:
+        r = value / threshold
+    else:                              # 門檻 ≤0：只看有沒有超過
+        r = 2.0 if value > threshold else 0.0
+    if r >= 1:
+        return 80 + 20 * min(r - 1, 1)
+    return 60 * max(r, 0)
+
+
+def fundamental_score(eps_min, roe_min, params: dict, fund_pass: bool) -> float:
+    """連續的基本面分數（取代原本只有 100 / 40 兩種）。
+    - 資料不足（<2 年）→ 40（與舊版相同）
+    - 通過門檻 → EPS、ROE 兩項平均，80~100
+    - 未通過 → 兩項平均，但最高 60（確保未過門檻永遠低於通過者）
+    """
+    if eps_min is None or roe_min is None:
+        return 40.0
+    avg = (_ratio_score(eps_min, params["eps_threshold"])
+           + _ratio_score(roe_min, params["roe_threshold"])) / 2
+    return round(avg if fund_pass else min(avg, 60.0), 1)
+
+
 def evaluate(stock_id: str, name: str, strategy: dict | None = None) -> Optional[dict]:
     """評估一檔股票。strategy 為策略 dict（含 params），不給就用預設值。"""
     params = merge_params(strategy)
@@ -34,11 +58,14 @@ def evaluate(stock_id: str, name: str, strategy: dict | None = None) -> Optional
             and min(roe_vals) > params["roe_threshold"]
         )
 
-        px = get_price_history(stock_id, params["backtest_years"])
+        # 還原除權息價：避免除息日假跌幅誤觸回測停損；最新收盤不受影響
+        px = get_price_history(stock_id, params["backtest_years"], True)
         if len(px) < 100:
             result["action"] = "SKIP"
             result["risk_notes"].append("價格資料不足")
             return result
+        if px.attrs.get("adjusted") is False:
+            result["risk_notes"].append("除權息還原失敗，回測使用原始價（可能低估）")
 
         px = add_indicators(px)
         latest = px.iloc[-1]
@@ -50,7 +77,12 @@ def evaluate(stock_id: str, name: str, strategy: dict | None = None) -> Optional
         else:
             vp = {"patterns": [], "bonus": 0, "details": {}}
 
-        fund_score = 100 if fund_pass else 40
+        has_fund = len(eps_vals) >= 2 and len(roe_vals) >= 2
+        fund_score = fundamental_score(
+            min(eps_vals) if has_fund else None,
+            min(roe_vals) if has_fund else None,
+            params, fund_pass,
+        )
         tech_score = max(0, min(100, ts["score"] + vp["bonus"]))
         winrate = bt.get("winrate")
         bt_score = (winrate if winrate is not None else 0.5) * 100
@@ -114,6 +146,7 @@ def evaluate(stock_id: str, name: str, strategy: dict | None = None) -> Optional
             "signal_score": signal_score,
             "components": {
                 "fundamental_pass": fund_pass,
+                "fundamental_score": fund_score,
                 "eps_min": min(eps_vals) if eps_vals else None,
                 "roe_min": min(roe_vals) if roe_vals else None,
                 "tech_score": tech_score,
@@ -136,6 +169,8 @@ def evaluate(stock_id: str, name: str, strategy: dict | None = None) -> Optional
             "entry_price": entry,
             "stop_loss_price": stop_price,
             "target_price": target_price,
+            "stop_loss_pct": params["stop_loss"],
+            "target_pct": params["target_return"],
             "risk_reward_ratio": rr,
             "position_size_pct": round(position_pct, 1),
             "entry_rule": entry_rule,

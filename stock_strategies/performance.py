@@ -8,7 +8,7 @@
 - entry_close: T 日收盤（參考價）
 - entry_open:  T+1 日開盤（實際進場價）
 - t5_/t10_/t20_ret: 以 entry_open 為基準的實際漲跌幅（%）
-- hit_target/hit_stop: 持有期內是否觸及 +10% / -8%
+- hit_target/hit_stop: 持有期內是否觸及策略停利 / 停損（預設 +10% / -8%）
 - status: 追蹤中 / 完成
 """
 
@@ -33,12 +33,16 @@ def _parse_float(v):
 def update_performance(
     existing: list[dict],
     today_signals: list[dict],
+    target_return: float | None = None,
+    stop_loss: float | None = None,
 ) -> list[dict]:
     """補齊舊訊號的 T+1/T+5/T+10/T+20，再附上今日新 BUY。
 
     回傳要寫回 Google Sheet 的完整紀錄清單。
     """
     records = [dict(r) for r in existing]  # 拷貝一份避免 side effect
+    target = CONFIG["target_return"] if target_return is None else target_return
+    stop = CONFIG["stop_loss"] if stop_loss is None else stop_loss
 
     # 1. 依 stock_id 分組，對每檔只抓一次歷史價
     unfinished_by_stock: dict[str, list[dict]] = {}
@@ -104,11 +108,11 @@ def update_performance(
                 # 只在還沒標記過時補上，讓結果單調不來回跳
                 if not r.get("hit_target"):
                     r["hit_target"] = (
-                        "Y" if hi >= entry_open * (1 + CONFIG["target_return"]) else ""
+                        "Y" if hi >= entry_open * (1 + target) else ""
                     )
                 if not r.get("hit_stop"):
                     r["hit_stop"] = (
-                        "Y" if lo <= entry_open * (1 - CONFIG["stop_loss"]) else ""
+                        "Y" if lo <= entry_open * (1 - stop) else ""
                     )
                 # 追蹤滿 20 天才把空的明確標 N
                 if len(window) >= 20:

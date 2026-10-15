@@ -136,11 +136,28 @@ def _read_cache(dataset: str, data_id: str) -> pd.DataFrame | None:
         return None
 
 
-def _write_cache(dataset: str, data_id: str, df: pd.DataFrame) -> None:
+def _covered_start(dataset: str, data_id: str) -> pd.Timestamp | None:
+    """快取「已向 API 要過」的最早起日；舊快取無此欄位時退用資料最早日期。"""
+    mp = _meta_path(dataset, data_id)
+    if not mp.exists():
+        return None
+    try:
+        meta = json.loads(mp.read_text())
+        v = meta.get("requested_start") or meta.get("min_date")
+        return pd.to_datetime(v) if v else None
+    except Exception:
+        return None
+
+
+def _write_cache(dataset: str, data_id: str, df: pd.DataFrame,
+                 requested_start: str | None = None) -> None:
     p = cache_path(dataset, data_id)
     p.parent.mkdir(parents=True, exist_ok=True)
+    prev = _covered_start(dataset, data_id)
     df.to_parquet(p, index=False)
+    starts = [pd.to_datetime(x) for x in (requested_start, prev) if x is not None]
     meta = {
+        "requested_start": str(min(starts).date()) if starts else None,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "min_date": str(df["date"].min()) if "date" in df and len(df) else None,
         "max_date": str(df["date"].max()) if "date" in df and len(df) else None,
@@ -198,6 +215,13 @@ def fetch_finmind_cached(
     """
     cached = None if force_refresh else _read_cache(dataset, data_id)
 
+    # 回補：快取只往後增量；若這次要的起日早於快取涵蓋範圍（例如先抓過近 3 年、
+    # 現在要 10 年回測），必須整段重抓，否則會靜悄悄拿到較短的歷史。
+    if cached is not None and len(cached) and "date" in cached.columns:
+        covered = _covered_start(dataset, data_id)
+        if covered is not None and pd.to_datetime(start_date) < covered:
+            cached = None
+
     if cached is not None and not force_refresh and _is_fresh(dataset, data_id, fresh_days):
         df = cached
     else:
@@ -223,7 +247,8 @@ def fetch_finmind_cached(
             df = fresh
         df = df.reset_index(drop=True)
         if len(df):
-            _write_cache(dataset, data_id, df)
+            _write_cache(dataset, data_id, df, requested_start=params["start_date"]
+                         if cached is None else None)
 
     # 切片
     if "date" in df.columns and len(df):

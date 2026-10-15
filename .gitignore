@@ -27,3 +27,8 @@ web/node_modules/
 web/.next/
 web/tsconfig.tsbuildinfo
 web/.env*.local
+
+# 定存股報告（本機產生）
+reports/
+_review/
+logs/

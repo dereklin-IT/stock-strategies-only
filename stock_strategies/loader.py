@@ -42,6 +42,7 @@ _PARAM_DEFAULTS: dict = {
     # 風險
     "target_return": CONFIG["target_return"],
     "stop_loss": CONFIG["stop_loss"],
+    "round_trip_cost": CONFIG["round_trip_cost"],
     # 評分加權
     "weight_fundamental": 0.3,
     "weight_technical": 0.3,
@@ -68,6 +69,7 @@ _WRITE_LOCK = threading.Lock()
 _BOUNDS = {
     "backtest_years": (1, 10), "hold_days": (1, 120),
     "target_return": (0.01, 0.5), "stop_loss": (0.01, 0.5),
+    "round_trip_cost": (0, 0.05),
     "min_total_score_for_buy": (0, 100), "min_tech_score_for_buy": (0, 100),
     "min_tech_score_for_signal": (0, 100), "market_filter_ma_period": (5, 120),
     "weight_fundamental": (0, 1), "weight_technical": (0, 1), "weight_backtest": (0, 1),

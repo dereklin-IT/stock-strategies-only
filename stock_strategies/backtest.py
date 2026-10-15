@@ -14,6 +14,7 @@ def backtest(df: pd.DataFrame, params: dict | None = None) -> dict:
       - hold_days
       - min_tech_score_for_signal
       - target_return / stop_loss
+      - round_trip_cost（來回交易成本，預設 0.585%，每筆報酬都扣除）
       - use_ma_alignment / use_bollinger_bounce / use_kd_golden_cross / use_macd_bullish
     沒給就退回到舊 CONFIG。
     """
@@ -23,6 +24,7 @@ def backtest(df: pd.DataFrame, params: dict | None = None) -> dict:
     min_score = int(params.get("min_tech_score_for_signal", CONFIG["min_tech_score_for_signal"]))
     target = float(params.get("target_return", CONFIG["target_return"]))
     stop = float(params.get("stop_loss", CONFIG["stop_loss"]))
+    cost = float(params.get("round_trip_cost", CONFIG["round_trip_cost"]))
 
     indices = []
     for i in range(60, len(df) - hold_days - 1):
@@ -50,19 +52,19 @@ def backtest(df: pd.DataFrame, params: dict | None = None) -> dict:
         hit_target = hi >= entry * (1 + target)
         hit_stop = lo <= entry * (1 - stop)
 
+        # 毛報酬：停利 / 停損（同一窗口兩者都碰到，保守視為停損）/ 到期收盤
         if hit_target and not hit_stop:
-            wins += 1
-            returns.append(target)
+            gross = target
         elif hit_stop:
-            losses += 1
-            returns.append(-stop)
+            gross = -stop
         else:
-            r = (fc - entry) / entry
-            returns.append(r)
-            if r > 0:
-                wins += 1
-            else:
-                losses += 1
+            gross = (fc - entry) / entry
+        net = gross - cost          # 扣掉來回手續費 + 證交稅
+        returns.append(net)
+        if net > 0:
+            wins += 1
+        else:
+            losses += 1
 
     total = wins + losses
     if total == 0:
@@ -71,5 +73,6 @@ def backtest(df: pd.DataFrame, params: dict | None = None) -> dict:
     return {
         "winrate": round(wins / total, 3),
         "samples": total,
-        "avg_return": round(float(np.mean(returns)), 4),
+        "avg_return": round(float(np.mean(returns)), 4),   # 已扣交易成本
+        "cost": cost,
     }

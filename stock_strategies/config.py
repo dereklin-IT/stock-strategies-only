@@ -32,6 +32,9 @@ CONFIG = {
     "stop_loss": 0.08,
     "min_tech_score_for_signal": 60,
     "min_total_score_for_buy": 65,
+    # 交易成本：手續費 0.1425%（買賣各一次）+ 證交稅 0.3%（賣出）＝ 來回 0.585%
+    # 有券商折扣可在策略參數 round_trip_cost 調低
+    "round_trip_cost": 0.001425 * 2 + 0.003,
     # 夜盤開盤方向分類門檻（漲跌幅 %）
     "night_gap_big": 1.5,    # |漲跌幅| ≥ 1.5% → 大漲 / 大跌
     "night_gap_small": 0.5,  # 0.5 ~ 1.5% → 小漲 / 小跌；< 0.5% → 平盤

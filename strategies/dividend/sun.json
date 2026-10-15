@@ -1,0 +1,15 @@
+{
+  "id": "dividend-sun",
+  "name": "定存股・策略3（孫悟天／大型穩定股）",
+  "description": "王勁惟(2020) 表3-1 策略3，出自《存股輕鬆學》。偏電信、金融等股本大、波動小的公司；論文全期年化約 10.4%，與 0050/0056 相近但波動較小。",
+  "rules": {
+    "eps_avg_years": 5,
+    "min_eps_avg": 1,
+    "min_share_capital_yi": 300,
+    "max_beta": 0.8,
+    "cash_div_years": 5,
+    "min_cash_div": 1,
+    "max_pbr": 2.5
+  },
+  "portfolio": {"max_holdings": 18, "rebalance_month": 4, "hold_years": [3, 5]}
+}
