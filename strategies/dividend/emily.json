@@ -1,0 +1,17 @@
+{
+  "id": "dividend-emily",
+  "name": "定存股・策略2（艾蜜莉／巴菲特概念）",
+  "description": "王勁惟(2020) 表3-1 策略2，出自《艾蜜莉教你自動化存股》。論文 2008~2019 全期年化約 15.3%，四策略最高；空頭期略輸 0056。董監持股/質押 FinMind 無資料，暫不檢查。",
+  "rules": {
+    "min_share_capital_yi": 50,
+    "min_bvps": 15,
+    "min_price": 10,
+    "min_roe": 15,
+    "max_debt_ratio": 50,
+    "cash_div_years": 2,
+    "min_cash_div": 0,
+    "min_director_holding": 20,
+    "max_director_pledge": 33
+  },
+  "portfolio": {"max_holdings": 18, "rebalance_month": 4, "hold_years": [3, 5]}
+}

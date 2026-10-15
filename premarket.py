@@ -18,20 +18,18 @@ except ImportError:
 
 from stock_strategies.night_session import get_night_session
 from stock_strategies.sheet import read_latest_signals
-from stock_strategies.notify import send_telegram, format_premarket
+from stock_strategies.notify import send_notification, format_premarket, required_notify_env
 
 
 REQUIRED_ENV = [
     "FINMIND_TOKEN",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
     "GOOGLE_SHEET_ID",
     "GOOGLE_CREDS_JSON",
-]
+]   # 推播通道需要的變數由 required_notify_env() 依 NOTIFY_CHANNEL 補上
 
 
 def main():
-    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    missing = [k for k in REQUIRED_ENV + required_notify_env() if not os.environ.get(k)]
     if missing:
         print(f"❌ 缺少環境變數: {missing}", file=sys.stderr)
         sys.exit(1)
@@ -56,8 +54,10 @@ def main():
     print(f"  → {len(signals)} 筆")
 
     # 3. 發送 Telegram 盤前快報
-    print("發送 Telegram 盤前快報...")
-    send_telegram(format_premarket(night, signals))
+    print("發送盤前快報...")
+    if not send_notification(format_premarket(night, signals)):
+        print("⚠️ 盤前快報推播發送失敗", file=sys.stderr)
+        sys.exit(2)
     print("✅ 完成")
 
 

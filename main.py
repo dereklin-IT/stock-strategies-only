@@ -3,7 +3,8 @@ V3.2 每日選股訊號系統
 
 新增：
 - 回測以「訊號日隔天開盤價」為進場（符合真實可執行）
-- 大盤濾鏡：加權指數跌破月線時，BUY 自動降為 WATCH
+- 大盤濾鏡：加權指數跌破策略設定的均線（預設 20 日）時，BUY 自動降為 WATCH
+- 策略選擇：環境變數 STRATEGY_ID 指定 strategies/<id>.json（未設定 = default）
 - 夜盤情緒濾鏡：昨晚台指期夜盤大跌時，BUY 進一步降為 WATCH（風控）
 - 成績單：自動追蹤每個 BUY 在 T+1/T+5/T+10/T+20 的實際表現
 
@@ -28,7 +29,8 @@ from stock_strategies.sheet import (
     write_performance,
 )
 from stock_strategies.evaluate import evaluate
-from stock_strategies.notify import send_telegram, format_messages
+from stock_strategies.loader import get_strategy, merge_params, StrategyError
+from stock_strategies.notify import send_notification, format_messages, required_notify_env
 from stock_strategies.market import get_market_state, apply_market_filter
 from stock_strategies.night_session import (
     get_night_session,
@@ -40,15 +42,13 @@ from stock_strategies.performance import update_performance, summary as perf_sum
 
 REQUIRED_ENV = [
     "FINMIND_TOKEN",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
     "GOOGLE_SHEET_ID",
     "GOOGLE_CREDS_JSON",
-]
+]   # 推播通道需要的變數（Telegram 或 Teams）由 required_notify_env() 依 NOTIFY_CHANNEL 補上
 
 
 def main():
-    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    missing = [k for k in REQUIRED_ENV + required_notify_env() if not os.environ.get(k)]
     if missing:
         print(f"❌ 缺少環境變數: {missing}", file=sys.stderr)
         sys.exit(1)
@@ -58,9 +58,19 @@ def main():
     watchlist = read_watchlist()
     print(f"  → {len(watchlist)} 檔啟用中")
 
-    # 2. 取得大盤狀態（濾鏡）
-    print("取得大盤狀態...")
-    market = get_market_state()
+    # 1b. 載入策略（STRATEGY_ID，預設 default）
+    strategy = load_strategy(os.environ.get("STRATEGY_ID") or "default")
+    params = merge_params(strategy)
+    print(f"  → 使用策略: {(strategy or {}).get('name', '內建預設參數')}")
+
+    # 2. 取得大盤狀態（濾鏡；依策略的 market_filter_enabled / market_filter_ma_period）
+    market_enabled = bool(params["market_filter_enabled"])
+    if market_enabled:
+        print("取得大盤狀態...")
+        market = get_market_state(int(params["market_filter_ma_period"]))
+    else:
+        market = {"bullish": True, "close": None, "ma20": None,
+                  "note": "⚪ 此策略已關閉大盤濾鏡"}
     print(f"  → {market['note']}")
 
     # 2b. 取得昨晚夜盤（情緒風控濾鏡）
@@ -75,15 +85,16 @@ def main():
         sid = str(row["stock_id"])
         name = row.get("name", "")
         print(f"[{i}/{len(watchlist)}] {sid} {name}")
-        r = evaluate(sid, name)
+        r = evaluate(sid, name, strategy)
         if r:
             results.append(r)
         time.sleep(0.6)
 
-    # 4. 套用大盤濾鏡：跌破月線時 BUY 一律降為 WATCH
-    downgraded = apply_market_filter(results, market)
+    # 4. 套用大盤濾鏡：跌破策略均線時 BUY 一律降為 WATCH
+    downgraded = apply_market_filter(results, market) if market_enabled else 0
     if downgraded:
-        print(f"⚠️ 大盤跌破月線，{downgraded} 檔 BUY 已自動降為 WATCH")
+        print(f"⚠️ 大盤跌破 {params['market_filter_ma_period']} 日線，"
+              f"{downgraded} 檔 BUY 已自動降為 WATCH")
 
     # 4b. 套用夜盤情緒濾鏡：昨晚夜盤大跌時 BUY 進一步降為 WATCH
     night_downgraded = apply_night_filter(results, night)
@@ -105,7 +116,10 @@ def main():
     print("更新 Performance 成績單...")
     try:
         existing_perf = read_performance()
-        updated_perf = update_performance(existing_perf, results)
+        updated_perf = update_performance(
+            existing_perf, results,
+            target_return=params["target_return"], stop_loss=params["stop_loss"],
+        )
         write_performance(updated_perf)
         stats = perf_summary(updated_perf)
         if stats["count"] > 0:
@@ -122,27 +136,52 @@ def main():
         stats = None
 
     # 7. 發送 Telegram
-    print("發送 Telegram...")
-    for msg in format_messages(results, watchlist, market=market, night_note=night_note):
-        send_telegram(msg)
+    print("發送推播...")
+    sent = failed = 0
+    for msg in format_messages(results, watchlist, market=market,
+                               night_note=night_note, params=params):
+        if send_notification(msg):
+            sent += 1
+        else:
+            failed += 1
         time.sleep(0.5)
 
     # 8. 若有累積的成績單，額外推一則摘要
     if stats and stats["count"] >= 5:
-        send_telegram(_format_perf_message(stats))
+        if send_notification(_format_perf_message(stats, params)):
+            sent += 1
+        else:
+            failed += 1
 
-    print("✅ 完成")
+    if failed:
+        print(f"⚠️ 完成，但推播 {failed} 則發送失敗（成功 {sent} 則）；"
+              "選股結果已寫入 Google Sheet", file=sys.stderr)
+        sys.exit(2)
+    print(f"✅ 完成（推播 {sent} 則）")
 
 
-def _format_perf_message(stats: dict) -> str:
+def load_strategy(strategy_id: str) -> dict | None:
+    """讀 strategies/<id>.json。找不到或格式錯誤 → 警告並回 None（= 內建預設參數）。"""
+    try:
+        strategy = get_strategy(strategy_id)
+    except StrategyError as e:
+        print(f"⚠️ 策略 {strategy_id} 讀取失敗，改用內建預設參數: {e}", file=sys.stderr)
+        return None
+    if strategy is None:
+        print(f"⚠️ 找不到策略 {strategy_id}，改用內建預設參數", file=sys.stderr)
+    return strategy
+
+
+def _format_perf_message(stats: dict, params: dict | None = None) -> str:
+    params = params or merge_params(None)
     lines = [
         "📈 *系統成績單（累積追蹤）*",
         "",
         f"已完成追蹤訊號: {stats['count']} 筆",
         f"T+20 勝率: {stats['winrate_t20']}%",
         f"T+20 平均報酬: {stats['avg_t20']}%",
-        f"觸及停利 +{int(0.10 * 100)}%: {stats['hit_target']} 次",
-        f"觸及停損 -{int(0.08 * 100)}%: {stats['hit_stop']} 次",
+        f"觸及停利 +{params['target_return'] * 100:.0f}%: {stats['hit_target']} 次",
+        f"觸及停損 -{params['stop_loss'] * 100:.0f}%: {stats['hit_stop']} 次",
         "",
         "_完整紀錄見 Google Sheet『Performance』分頁_",
     ]

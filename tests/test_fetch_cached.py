@@ -65,7 +65,8 @@ def test_incremental_only_fetches_after_max_date(monkeypatch):
     monkeypatch.setattr(cache, "_rate_limited_get", fake)
     # 預先寫一個「過期」快取：max_date = 2020-01-02（距今已過 fresh_days）
     old = pd.DataFrame({"date": pd.to_datetime(["2020-01-02"]), "close": [10]})
-    cache._write_cache("TaiwanStockPrice", "2330", old)
+    # 快取已涵蓋 2015-01-01 起（requested_start 記錄），故只需增量
+    cache._write_cache("TaiwanStockPrice", "2330", old, requested_start="2015-01-01")
     cache.fetch_finmind_cached("TaiwanStockPrice", "2330", "2015-01-01")
     # 增量起點應為 max_date(2020-01-02) - 7d = 2019-12-26，而非請求的 2015-01-01
     assert captured["start_date"] == "2019-12-26"
@@ -115,3 +116,33 @@ def test_financial_statements_use_quarterly_freshness():
                        pd.DataFrame({"date": pd.to_datetime(["2026-03-31"])}))
     assert cache._is_fresh("TaiwanStockBalanceSheet", "TEST_Q2", None,
                            today=pd.Timestamp("2026-06-15")) is True
+
+
+def test_backfill_when_requesting_earlier_history(monkeypatch):
+    """快取只涵蓋 2022 起，這次要 2010 起 → 必須整段重抓，不可回傳較短歷史。"""
+    captured = []
+
+    def fake(params, timeout, max_retries):
+        captured.append(params["start_date"])
+        return {"status": 200, "data": [{"date": "2010-03-31", "v": 1}, {"date": "2022-03-31", "v": 2}]}
+
+    monkeypatch.setattr(cache, "_rate_limited_get", fake)
+    short = pd.DataFrame({"date": pd.to_datetime(["2022-03-31"]), "v": [2]})
+    cache._write_cache("TaiwanStockBalanceSheet", "BF1", short, requested_start="2022-01-01")
+    df = cache.fetch_finmind_cached("TaiwanStockBalanceSheet", "BF1", "2010-01-01")
+    assert captured == ["2010-01-01"]
+    assert df["date"].min() == pd.Timestamp("2010-03-31")
+
+
+def test_no_repeated_backfill_for_late_listed_stock(monkeypatch):
+    """上市晚於請求起日的股票：重抓一次後記下 requested_start，之後不再重抓。"""
+    calls = []
+
+    def fake(params, timeout, max_retries):
+        calls.append(params["start_date"])
+        return {"status": 200, "data": [{"date": "2018-06-30", "v": 1}]}
+
+    monkeypatch.setattr(cache, "_rate_limited_get", fake)
+    cache.fetch_finmind_cached("TaiwanStockBalanceSheet", "LATE", "2010-01-01")
+    cache.fetch_finmind_cached("TaiwanStockBalanceSheet", "LATE", "2010-01-01", fresh_days=99999)
+    assert calls == ["2010-01-01"]
